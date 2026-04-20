@@ -18,6 +18,7 @@ public class MessageRouter {
 
     private final SessionService sessionService;
     private final LanguageService languageService;
+    private final TranslationService translationService;
     private final WhatsAppSender sender;
     private final SymptomService symptomService;
     private final DiseaseAlertService diseaseAlertService;
@@ -37,49 +38,58 @@ public class MessageRouter {
 
             String from = message.path("from").asText();
             String type = message.path("type").asText();
-            String text = message.path("text").path("body").asText().trim();
-            UserSession session = sessionService.getOrCreate(from);
-            String lang = languageService.detect(text, session);
-            session.setLanguage(lang);
 
-            // Exit command — works from any state
-            if (text.equalsIgnoreCase("menu") || text.equalsIgnoreCase("exit")
-                    || text.equalsIgnoreCase("cancel") || text.equals("0")) {
+            // 1. HANDLE NATIVE LOCATION FIRST (Safety)
+            if ("location".equals(type)) {
+                UserSession session = sessionService.getOrCreate(from);
+                String lang = session.getLanguage() != null ? session.getLanguage() : "en";
+                double lat = message.path("location").path("latitude").asDouble();
+                double lon = message.path("location").path("longitude").asDouble();
+                sendTranslatedResponse(from, hospitalService.findNearbyByCoords(lat, lon, "en"), lang);
+                session.setState(State.MENU);
+                sessionService.save(session);
+                return;
+            }
+
+            // 2. TEXT-BASED LOGIC
+            String originalText = message.path("text").path("body").asText().trim();
+            String lang = languageService.getOrSetLanguage(from, originalText);
+            
+            UserSession session = sessionService.getOrCreate(from);
+            session.setLanguage(lang); 
+
+            // Only translate and check commands if it's actually a text message
+            String text = originalText;
+            if ("text".equals(type) && !originalText.isEmpty()) {
+                text = "en".equals(lang) ? originalText : translationService.translate(originalText, "en");
+            }
+
+            // Exit command guard
+            if (text != null && (text.equalsIgnoreCase("menu") || text.equalsIgnoreCase("exit")
+                    || text.equalsIgnoreCase("cancel") || text.equals("0"))) {
                 session.setState(State.MENU);
                 session.getChatHistory().clear();
                 sessionService.save(session);
-                sender.send(from, getMenuMessage(lang, session.getCity()));
+                sendTranslatedResponse(from, getMenuMessage(session.getCity()), lang);
                 return;
             }
 
             // Detect Google Maps links shared as text
-            if ("text".equals(type) && isGoogleMapsLink(text)) {
-                double[] coords = extractCoordsFromMapsLink(text);
+            if ("text".equals(type) && isGoogleMapsLink(originalText)) {
+                double[] coords = extractCoordsFromMapsLink(originalText);
                 if (coords != null) {
-                    sender.send(from, hospitalService.findNearbyByCoords(coords[0], coords[1], lang));
+                    sendTranslatedResponse(from, hospitalService.findNearbyByCoords(coords[0], coords[1], "en"), lang);
                     session.setState(State.MENU);
                     sessionService.save(session);
                 } else {
-                    sender.send(from, "hi".equals(lang)
-                            ? "Link se location nahi mili. Apna shehar type karein (jaise: Jalandhar):"
-                            : "Could not read location from link. Please type your city name (e.g. Jalandhar):");
+                    sendTranslatedResponse(from, "Could not read location from link. Please type your city name (e.g. Jalandhar):", lang);
                 }
-                return;
-            }
-
-            // Handle native WhatsApp GPS location message
-            if ("location".equals(type)) {
-                double lat = message.path("location").path("latitude").asDouble();
-                double lon = message.path("location").path("longitude").asDouble();
-                sender.send(from, hospitalService.findNearbyByCoords(lat, lon, lang));
-                session.setState(State.MENU);
-                sessionService.save(session);
                 return;
             }
 
             // Mid symptom-check conversation
             if (session.getState() == State.SYMPTOM_CHAT) {
-                sender.send(from, symptomService.continueChat(from, text, session));
+                sendTranslatedResponse(from, symptomService.continueChat(from, text, session), lang);
                 return;
             }
 
@@ -87,7 +97,7 @@ public class MessageRouter {
             if (session.getState() == State.AWAITING_LOCATION && "text".equals(type)) {
                 session.setState(State.MENU);
                 sessionService.save(session);
-                sender.send(from, hospitalService.findNearby(text, lang));
+                sendTranslatedResponse(from, hospitalService.findNearby(text, "en"), lang);
                 return;
             }
 
@@ -98,52 +108,56 @@ public class MessageRouter {
                 // Greeting detection
                 if (lower.equals("hello") || lower.equals("hi") || lower.equals("hey")
                         || lower.equals("namaste") || lower.equals("hii") || lower.equals("start")) {
-                    sender.send(from, lang.equals("hi")
-                            ? "Namaste! Swagat hai Health Bot mein.\n\nApna shehar ya zila batayein (jaise: Mumbai, Jaipur, Delhi):"
-                            : "Welcome to HealthBot!\n\nPlease tell me your city or district (e.g. Mumbai, Jaipur, Delhi):");
+                    sendTranslatedResponse(from, "Welcome to HealthBot!\n\nPlease tell me your city or district (e.g. Mumbai, Jaipur, Delhi):", lang);
                     return;
                 }
 
                 if (isLikelyCity(text)) {
                     session.setCity(text);
                     sessionService.save(session);
-                    sender.send(from, getMenuMessage(lang, text));
+                    sendTranslatedResponse(from, getMenuMessage(text), lang);
                 } else {
-                    sender.send(from, lang.equals("hi")
-                            ? "Namaste! Apna shehar ya zila batayein (jaise: Mumbai, Jaipur):"
-                            : "Hello! Please tell me your city or district (e.g. Mumbai, Jaipur):");
+                    sendTranslatedResponse(from, "Hello! Please tell me your city or district (e.g. Mumbai, Jaipur):", lang);
                 }
                 return;
             }
 
             // Route by menu choice
             switch (text) {
-                case "1" -> sender.send(from, diseaseAlertService.getAlerts(session.getCity(), lang));
-                case "2" -> sender.send(from, policyService.getPolicies(session.getCity(), lang));
+                case "1" -> sendTranslatedResponse(from, diseaseAlertService.getAlerts(session.getCity(), "en"), lang);
+                case "2" -> sendTranslatedResponse(from, policyService.getPolicies(session.getCity(), "en"), lang);
                 case "3" -> {
                     session.setState(State.SYMPTOM_CHAT);
                     sessionService.save(session);
-                    sender.send(from, symptomService.startChat(from, lang));
+                    // Pass "en" to symptomService since we handle translation
+                    sendTranslatedResponse(from, symptomService.startChat(from, "en"), lang);
                 }
                 case "4" -> {
                     session.setState(State.AWAITING_LOCATION);
                     sessionService.save(session);
-                    sender.send(from, "hi".equals(lang)
-                            ? "Apni location share karein:\n\n"
-                            + "1. WhatsApp attachment → Location → Current Location\n"
-                            + "2. Google Maps link paste karein\n"
-                            + "3. Ya apna shehar type karein (jaise: Jalandhar)"
-                            : "Share your location:\n\n"
+                    sendTranslatedResponse(from, "Share your location:\n\n"
                             + "1. Tap attachment → Location → Current Location\n"
                             + "2. Paste a Google Maps link\n"
-                            + "3. Or just type your city name (e.g. Jalandhar)");
+                            + "3. Or just type your city name (e.g. Jalandhar)", lang);
                 }
-                default -> sender.send(from, getMenuMessage(lang, session.getCity()));
+                case "5" -> {
+                    session.setCity(null);
+                    sessionService.save(session);
+                    sendTranslatedResponse(from, "Sure. Please tell me your new city or district (e.g. Mumbai, Jaipur):", lang);
+                }
+                default -> sendTranslatedResponse(from, getMenuMessage(session.getCity()), lang);
             }
 
         } catch (Exception e) {
             log.error("Error routing message from Meta: ", e);
         }
+    }
+    
+    private void sendTranslatedResponse(String from, String response, String lang) {
+        if (!"en".equals(lang)) {
+            response = translationService.translate(response, lang);
+        }
+        sender.send(from, response);
     }
 
     private boolean isGoogleMapsLink(String text) {
@@ -211,21 +225,8 @@ public class MessageRouter {
         return null;
     }
 
-    private String getMenuMessage(String lang, String city) {
+    private String getMenuMessage(String city) {
         if (city == null) city = "your area";
-        if ("hi".equals(lang)) {
-            return String.format("""
-                *%s ke liye health jaankari* 🏥
-
-                Kya jaanna chahte hain?
-                1️⃣ Mere area mein bimariyan
-                2️⃣ Sarkari yojnayen
-                3️⃣ Mere lakshan check karein
-                4️⃣ Nazdeeki sarkari hospital
-
-                Ek number bhejein.
-                _(Kabhi bhi *menu* type karein wapas aane ke liye)_""", city);
-        }
         return String.format("""
             *Health info for %s* 🏥
 
@@ -234,12 +235,13 @@ public class MessageRouter {
             2️⃣ Government health schemes
             3️⃣ Check my symptoms
             4️⃣ Nearest government hospital
+            5️⃣ Change my city
 
             Reply with a number.
             _(Type *menu* anytime to return here)_""", city);
     }
 
     private boolean isLikelyCity(String text) {
-        return text.length() > 2 && text.length() < 40 && !text.matches("^[1-4]$");
+        return text.length() > 2 && text.length() < 40 && !text.matches("^[1-5]$");
     }
 }

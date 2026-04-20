@@ -38,11 +38,15 @@ public class SymptomService {
         session.getChatHistory().add(new ChatMessage("user", userMessage));
 
         String systemPrompt = """
-                You are a public health assistant for India. Respond in %s language only.
-                Ask ONE follow-up question at a time about the user's symptoms.
-                After 3-4 exchanges, list 2-3 possible conditions in simple words.
-                Always end with a disclaimer to consult a doctor.
-                Never give a definitive diagnosis. Keep responses short and simple.
+                You are a public health information assistant for India. Respond in %s language only.
+                
+                Guidelines:
+                1. Ask ONE follow-up question at a time to narrow down symptoms.
+                2. After exactly 3-4 exchanges, provide a list of 2-3 common health patterns or educational info related to the symptoms.
+                3. USE EDUCATIONAL LABELS: Start the list with "Based on common health patterns, this is often seen in cases of:".
+                4. AVOID the word "diagnosis". Use "educational health information" or "observed patterns" instead.
+                5. ALWAYS conclude with: "This is educational info and NOT a professional diagnosis. Please consult a qualified doctor immediately."
+                6. Ensure the response is completely generated and supportive.
                 """.formatted("hi".equals(session.getLanguage()) ? "Hindi" : "English");
 
         String reply = callGemini(systemPrompt, session.getChatHistory());
@@ -64,6 +68,7 @@ public class SymptomService {
     private String callGemini(String systemPrompt, List<ChatMessage> history) {
         List<Map<String, Object>> contents = new ArrayList<>();
 
+        // 1. Add chat history with STRICT alternating roles (user/model)
         for (ChatMessage msg : history) {
             String role = "assistant".equals(msg.getRole()) ? "model" : "user";
 
@@ -77,36 +82,65 @@ public class SymptomService {
             contents.add(content);
         }
 
-        Map<String, Object> systemPart = new HashMap<>();
-        systemPart.put("text", systemPrompt);
-
-        Map<String, Object> systemInstruction = new HashMap<>();
-        systemInstruction.put("parts", List.of(systemPart));
-
+        // 2. Build Generation Config
         Map<String, Object> generationConfig = new HashMap<>();
-        generationConfig.put("maxOutputTokens", 300);
+        generationConfig.put("maxOutputTokens", 512);
 
+        // 3. Construct Request Body with system_instruction
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("system_instruction", systemInstruction);
         requestBody.put("contents", contents);
         requestBody.put("generationConfig", generationConfig);
 
+        // Add proper system instruction
+        Map<String, Object> sysPart = new HashMap<>();
+        sysPart.put("text", systemPrompt);
+        Map<String, Object> sysInstruction = new HashMap<>();
+        sysInstruction.put("parts", List.of(sysPart));
+        requestBody.put("system_instruction", sysInstruction);
+
+        // 4. Add Safety Settings to prevent mid-sentence blocks
+        List<Map<String, Object>> safetySettings = new ArrayList<>();
+        String[] categories = {
+                "HARM_CATEGORY_HARASSMENT",
+                "HARM_CATEGORY_HATE_SPEECH",
+                "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "HARM_CATEGORY_DANGEROUS_CONTENT"
+        };
+        for (String category : categories) {
+            Map<String, Object> setting = new HashMap<>();
+            setting.put("category", category);
+            setting.put("threshold", "BLOCK_NONE");
+            safetySettings.add(setting);
+        }
+        requestBody.put("safetySettings", safetySettings);
+
         try {
             return geminiClient.post()
-                    .uri("/v1beta/models/gemini-1.5-flash:generateContent?key=" + geminiApiKey)
+                    .uri("/v1beta/models/gemini-flash-latest:generateContent")
                     .header("Content-Type", "application/json")
+                    .header("X-goog-api-key", geminiApiKey)
                     .bodyValue(requestBody)
                     .retrieve()
                     .bodyToMono(JsonNode.class)
-                    .map(r -> r.path("candidates").get(0)
-                            .path("content")
-                            .path("parts").get(0)
-                            .path("text").asText())
+                    .map(r -> {
+                        JsonNode candidates = r.path("candidates");
+                        if (candidates.isMissingNode() || candidates.size() == 0) {
+                            return "I apologize, but I cannot provide information on this topic. Please consult a medical professional.";
+                        }
+                        JsonNode candidate = candidates.get(0);
+                        String text = candidate.path("content").path("parts").get(0).path("text").asText();
+                        
+                        if (text == null || text.trim().isEmpty()) {
+                            return "Based on safety guidelines, I cannot complete this response. Please see a doctor for medical concerns.";
+                        }
+                        return text;
+                    })
                     .block();
-        }catch (Exception e) {
-        System.out.println(">>> GEMINI ERROR: " + e.getMessage());
-        e.printStackTrace();
-        return "Sorry, I am having trouble responding right now. Please try again.";
-    }
+
+        } catch (Exception e) {
+            System.out.println(">>> GEMINI ERROR: " + e.getMessage());
+            e.printStackTrace();
+            return "Sorry, I am having trouble responding right now. Please try again.";
+        }
     }
 }

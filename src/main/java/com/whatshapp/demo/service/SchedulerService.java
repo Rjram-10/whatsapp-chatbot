@@ -11,7 +11,7 @@ public class SchedulerService {
     private final DiseaseAlertService diseaseService;
 
     // Every Monday 9 AM
-    @Scheduled(cron = "0 0 9 ? * MON")
+    @Scheduled(cron = "0 33 12 ? * FRI")
     public void fetchWeeklyData() {
         System.out.println("Fetching IDSP weekly data...");
         try {

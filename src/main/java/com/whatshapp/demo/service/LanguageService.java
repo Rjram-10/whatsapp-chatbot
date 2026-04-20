@@ -1,20 +1,30 @@
 package com.whatshapp.demo.service;
 
-import com.whatshapp.demo.model.UserSession;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
-import java.util.regex.Pattern;
-
 @Service
+@RequiredArgsConstructor
 public class LanguageService {
 
-    // Devanagari Unicode block: \u0900–\u097F
-    private static final Pattern HINDI_PATTERN = Pattern.compile("[\\u0900-\\u097F]");
+    private final RedisService redisService;
 
-    public String detect(String text, UserSession session) {
-        if (HINDI_PATTERN.matcher(text).find()) return "hi";
-        // If user previously set a language, keep it
-        if (session.getLanguage() != null) return session.getLanguage();
+    public String detectLanguage(String text) {
+        // simple detection (can improve later)
+        if (text.matches(".*[\\u0900-\\u097F].*")) return "hi";
         return "en";
+    }
+
+    public String getOrSetLanguage(String user, String message) {
+
+        String lang = redisService.getUserLanguage(user);
+
+        if (lang != null) return lang;
+
+        lang = detectLanguage(message);
+
+        redisService.saveUserLanguage(user, lang);
+
+        return lang;
     }
 }
