@@ -36,7 +36,6 @@ public class OllamaService {
         request.put("model", embedModel);
         request.put("prompt", text);
 
-
         try {
             JsonNode response = getClient().post()
                     .uri("/api/embeddings")
