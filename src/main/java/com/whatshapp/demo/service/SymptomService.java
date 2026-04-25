@@ -1,31 +1,30 @@
 package com.whatshapp.demo.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.whatshapp.demo.model.ChatMessage;
 import com.whatshapp.demo.model.State;
 import com.whatshapp.demo.model.UserSession;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class SymptomService {
 
-    @Value("${gemini.api.key}")
+    @Value("${gemini.api.key:}")
     private String geminiApiKey;
 
-    private final WebClient geminiClient = WebClient.builder()
-            .baseUrl("https://generativelanguage.googleapis.com")
-            .build();
-
     private final SessionService sessionService;
+    private final OllamaService ollamaService;
+    private final DiseaseSearchService diseaseSearchService;
 
     public String startChat(String phone, String lang) {
         return "hi".equals(lang)
@@ -34,22 +33,18 @@ public class SymptomService {
     }
 
     public String continueChat(String phone, String userMessage, UserSession session) {
-
         session.getChatHistory().add(new ChatMessage("user", userMessage));
 
-        String systemPrompt = """
-                You are a public health information assistant for India. Respond in %s language only.
-                
-                Guidelines:
-                1. Ask ONE follow-up question at a time to narrow down symptoms.
-                2. After exactly 3-4 exchanges, provide a list of 2-3 common health patterns or educational info related to the symptoms.
-                3. USE EDUCATIONAL LABELS: Start the list with "Based on common health patterns, this is often seen in cases of:".
-                4. AVOID the word "diagnosis". Use "educational health information" or "observed patterns" instead.
-                5. ALWAYS conclude with: "This is educational info and NOT a professional diagnosis. Please consult a qualified doctor immediately."
-                6. Ensure the response is completely generated and supportive.
-                """.formatted("hi".equals(session.getLanguage()) ? "Hindi" : "English");
+        String reply;
 
-        String reply = callGemini(systemPrompt, session.getChatHistory());
+        // Check if Ollama is available
+        if (ollamaService.isAvailable()) {
+            reply = continueWithOllama(userMessage, session) + "\n\n_(via Ollama)_";
+        } else {
+            // Fallback to Gemini
+            log.warn("Ollama not available, falling back to Gemini");
+            reply = continueWithGemini(session) + "\n\n_(via Gemini)_";
+        }
 
         session.getChatHistory().add(new ChatMessage("assistant", reply));
 
@@ -65,82 +60,116 @@ public class SymptomService {
         return reply;
     }
 
-    private String callGemini(String systemPrompt, List<ChatMessage> history) {
-        List<Map<String, Object>> contents = new ArrayList<>();
+    private String continueWithOllama(String userMessage, UserSession session) {
+        String lang = session.getLanguage();
 
-        // 1. Add chat history with STRICT alternating roles (user/model)
-        for (ChatMessage msg : history) {
-            String role = "assistant".equals(msg.getRole()) ? "model" : "user";
+        // Build RAG context after first exchange
+        String context = "";
+        if (session.getChatHistory().size() >= 2) {
+            String allSymptoms = session.getChatHistory().stream()
+                    .filter(m -> "user".equals(m.getRole()))
+                    .map(ChatMessage::getContent)
+                    .collect(Collectors.joining(". "));
 
-            Map<String, Object> part = new HashMap<>();
-            part.put("text", msg.getContent());
+            List<DiseaseSearchService.DiseaseMatch> matches =
+                    diseaseSearchService.findSimilarDiseases(allSymptoms, 3);
 
-            Map<String, Object> content = new HashMap<>();
-            content.put("role", role);
-            content.put("parts", List.of(part));
-
-            contents.add(content);
+            if (!matches.isEmpty()) {
+                context = diseaseSearchService.buildContext(matches);
+                log.info("RAG found {} matching diseases for: {}", matches.size(), allSymptoms);
+            }
         }
 
-        // 2. Build Generation Config
-        Map<String, Object> generationConfig = new HashMap<>();
-        generationConfig.put("maxOutputTokens", 512);
+        String systemPrompt = buildSystemPrompt(lang, context);
 
-        // 3. Construct Request Body with system_instruction
-        Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("contents", contents);
-        requestBody.put("generationConfig", generationConfig);
-
-        // Add proper system instruction
-        Map<String, Object> sysPart = new HashMap<>();
-        sysPart.put("text", systemPrompt);
-        Map<String, Object> sysInstruction = new HashMap<>();
-        sysInstruction.put("parts", List.of(sysPart));
-        requestBody.put("system_instruction", sysInstruction);
-
-        // 4. Add Safety Settings to prevent mid-sentence blocks
-        List<Map<String, Object>> safetySettings = new ArrayList<>();
-        String[] categories = {
-                "HARM_CATEGORY_HARASSMENT",
-                "HARM_CATEGORY_HATE_SPEECH",
-                "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "HARM_CATEGORY_DANGEROUS_CONTENT"
-        };
-        for (String category : categories) {
-            Map<String, Object> setting = new HashMap<>();
-            setting.put("category", category);
-            setting.put("threshold", "BLOCK_NONE");
-            safetySettings.add(setting);
-        }
-        requestBody.put("safetySettings", safetySettings);
+        // Convert ChatMessage list to Map list for Ollama
+        List<Map<String, String>> history = session.getChatHistory().stream()
+                .map(msg -> {
+                    Map<String, String> m = new HashMap<>();
+                    m.put("role", msg.getRole());
+                    m.put("content", msg.getContent());
+                    return m;
+                })
+                .collect(Collectors.toList());
 
         try {
-            return geminiClient.post()
-                    .uri("/v1beta/models/gemini-flash-latest:generateContent")
+            return ollamaService.chat(systemPrompt, history);
+        } catch (Exception e) {
+            log.error("Ollama chat failed: {}", e.getMessage());
+            return "hi".equals(lang)
+                    ? "Maafi, abhi jawab dene mein dikkat aa rahi hai. Thodi der baad try karein."
+                    : "Sorry, having trouble responding. Please try again in a moment.";
+        }
+    }
+
+    private String buildSystemPrompt(String lang, String ragContext) {
+        String base = String.format("""
+            You are a public health assistant for India. 
+            Respond ONLY in %s language.
+            Ask ONE follow-up question at a time about symptoms.
+            After 3-4 exchanges, list 2-3 possible conditions in simple words.
+            ALWAYS end with: consult a doctor for proper diagnosis.
+            Never give a definitive diagnosis.
+            Keep responses under 100 words.
+            """,
+            "hi".equals(lang) ? "Hindi" : "English"
+        );
+
+        if (!ragContext.isEmpty()) {
+            base += "\n\nRelevant medical context to consider:\n" + ragContext;
+        }
+
+        return base;
+    }
+
+    private String continueWithGemini(UserSession session) {
+        // Existing Gemini implementation as fallback
+        String lang = session.getLanguage();
+        try {
+            org.springframework.web.reactive.function.client.WebClient geminiClient =
+                    org.springframework.web.reactive.function.client.WebClient.builder()
+                            .baseUrl("https://generativelanguage.googleapis.com")
+                            .build();
+
+            List<Map<String, Object>> contents = new ArrayList<>();
+            for (ChatMessage msg : session.getChatHistory()) {
+                String role = "assistant".equals(msg.getRole()) ? "model" : "user";
+                Map<String, Object> part = new HashMap<>();
+                part.put("text", msg.getContent());
+                Map<String, Object> content = new HashMap<>();
+                content.put("role", role);
+                content.put("parts", List.of(part));
+                contents.add(content);
+            }
+
+            Map<String, Object> systemPart = new HashMap<>();
+            systemPart.put("text", buildSystemPrompt(lang, ""));
+            Map<String, Object> systemInstruction = new HashMap<>();
+            systemInstruction.put("parts", List.of(systemPart));
+            Map<String, Object> generationConfig = new HashMap<>();
+            generationConfig.put("maxOutputTokens", 300);
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("system_instruction", systemInstruction);
+            requestBody.put("contents", contents);
+            requestBody.put("generationConfig", generationConfig);
+
+            com.fasterxml.jackson.databind.JsonNode response = geminiClient.post()
+                    .uri("/v1beta/models/gemini-1.5-flash:generateContent?key=" + geminiApiKey)
                     .header("Content-Type", "application/json")
-                    .header("X-goog-api-key", geminiApiKey)
                     .bodyValue(requestBody)
                     .retrieve()
-                    .bodyToMono(JsonNode.class)
-                    .map(r -> {
-                        JsonNode candidates = r.path("candidates");
-                        if (candidates.isMissingNode() || candidates.size() == 0) {
-                            return "I apologize, but I cannot provide information on this topic. Please consult a medical professional.";
-                        }
-                        JsonNode candidate = candidates.get(0);
-                        String text = candidate.path("content").path("parts").get(0).path("text").asText();
-                        
-                        if (text == null || text.trim().isEmpty()) {
-                            return "Based on safety guidelines, I cannot complete this response. Please see a doctor for medical concerns.";
-                        }
-                        return text;
-                    })
+                    .bodyToMono(com.fasterxml.jackson.databind.JsonNode.class)
                     .block();
 
+            return response.path("candidates").get(0)
+                    .path("content").path("parts").get(0)
+                    .path("text").asText();
+
         } catch (Exception e) {
-            System.out.println(">>> GEMINI ERROR: " + e.getMessage());
-            e.printStackTrace();
-            return "Sorry, I am having trouble responding right now. Please try again.";
+            log.error("Gemini fallback also failed: {}", e.getMessage());
+            return "hi".equals(lang)
+                    ? "Maafi, abhi symptom checker available nahi hai. Baad mein try karein."
+                    : "Sorry, symptom checker is currently unavailable. Please try again later.";
         }
     }
 }

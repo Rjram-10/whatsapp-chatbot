@@ -133,7 +133,7 @@ public class PolicyService {
 
         try {
             return geminiClient.post()
-                    .uri("/v1beta/models/gemini-1.5-flash-latest:generateContent?key=" + geminiApiKey)
+                    .uri("/v1beta/models/gemini-flash-latest:generateContent?key=" + geminiApiKey)
                     .header("Content-Type", "application/json")
                     .bodyValue(requestBody)
                     .retrieve()

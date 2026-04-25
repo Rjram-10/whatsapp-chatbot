@@ -207,7 +207,7 @@ public class MessageRouter {
 
             // Follow redirect
             java.net.HttpURLConnection connection = (java.net.HttpURLConnection)
-                    new java.net.URL(cleanUrl).openConnection();
+                    new java.net.URI(cleanUrl).toURL().openConnection();
             connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(3000);
             connection.setReadTimeout(3000);
