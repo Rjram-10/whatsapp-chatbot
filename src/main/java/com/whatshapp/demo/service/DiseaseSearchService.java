@@ -6,7 +6,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -18,13 +17,24 @@ public class DiseaseSearchService {
     private final JdbcTemplate jdbcTemplate;
     private final OllamaService ollamaService;
 
+    public String extractKeywords(String text) {
+        if (text == null) return "";
+        return text.toLowerCase()
+            .replaceAll("[^a-z ]", "")
+            .replaceAll("\\s+", " ")
+            .trim();
+    }
+
     public List<DiseaseMatch> findSimilarDiseases(String symptomsText, int topK) {
         try {
+            // Clean up query text (Smart Layer)
+            String enrichedQuery = extractKeywords(symptomsText);
+
             // Get embedding for user's symptom description
-            float[] queryEmbedding = ollamaService.getEmbedding(symptomsText);
+            float[] queryEmbedding = ollamaService.getEmbedding(enrichedQuery);
             String vectorStr = toVectorString(queryEmbedding);
 
-            // Search using cosine similarity
+            // Search using cosine similarity (Threshold increased to 0.5)
             String sql = """
                 SELECT 
                     disease_name,
@@ -33,12 +43,12 @@ public class DiseaseSearchService {
                     precautions,
                     1 - (embedding <=> ?::vector) as similarity
                 FROM disease_embeddings
-                WHERE 1 - (embedding <=> ?::vector) > 0.3
+                WHERE 1 - (embedding <=> ?::vector) > 0.5
                 ORDER BY embedding <=> ?::vector
                 LIMIT ?
                 """;
 
-            return jdbcTemplate.query(sql,
+            List<DiseaseMatch> rawResults = jdbcTemplate.query(sql,
                 (rs, rowNum) -> new DiseaseMatch(
                     rs.getString("disease_name"),
                     rs.getString("symptoms"),
@@ -46,8 +56,35 @@ public class DiseaseSearchService {
                     rs.getString("precautions"),
                     rs.getDouble("similarity")
                 ),
-                vectorStr, vectorStr, vectorStr, topK
+                vectorStr, vectorStr, vectorStr, topK * 3 // fetch extra for scoring
             );
+
+            // Post-filter clinical scoring
+            return rawResults.stream()
+                .map(d -> {
+                    double score = d.similarity();
+                    String diseaseLower = d.diseaseName().toLowerCase();
+                    
+                    // Simple clinical scoring based on keywords matching disease specific flags
+                    if (enrichedQuery.contains("left") && enrichedQuery.contains("abdomen")) {
+                        if (diseaseLower.contains("appendicitis")) score -= 0.2;
+                        if (diseaseLower.contains("diverticulitis")) score += 0.2;
+                    }
+                    if (enrichedQuery.contains("right") && enrichedQuery.contains("abdomen")) {
+                        if (diseaseLower.contains("appendicitis")) score += 0.2;
+                    }
+
+                    return new DiseaseMatch(
+                        d.diseaseName(),
+                        d.symptoms(),
+                        d.description(),
+                        d.precautions(),
+                        score
+                    );
+                })
+                .sorted((a, b) -> Double.compare(b.similarity(), a.similarity()))
+                .limit(topK)
+                .toList();
 
         } catch (Exception e) {
             log.error("Disease search error: {}", e.getMessage());
@@ -64,16 +101,12 @@ public class DiseaseSearchService {
         for (int i = 0; i < matches.size(); i++) {
             DiseaseMatch match = matches.get(i);
             context.append(String.format(
-                "%d. %s (relevance: %.0f%%)\n" +
-                "   Symptoms: %s\n" +
-                "   Info: %s\n" +
-                "   Precautions: %s\n\n",
+                "%d. %s\n" +
+                "   Key symptoms: %s\n" +
+                "   Why relevant: matches reported symptoms and context\n\n",
                 i + 1,
                 match.diseaseName(),
-                match.similarity() * 100,
-                match.symptoms(),
-                match.description(),
-                match.precautions()
+                match.symptoms()
             ));
         }
 
@@ -81,10 +114,9 @@ public class DiseaseSearchService {
     }
 
     private String toVectorString(float[] embedding) {
-        String values = java.util.stream.IntStream.range(0, embedding.length)
+        return "[" + java.util.stream.IntStream.range(0, embedding.length)
                 .mapToObj(i -> String.format("%.6f", embedding[i]))
-                .collect(Collectors.joining(","));
-        return "[" + values + "]";
+                .collect(Collectors.joining(",")) + "]";
     }
 
     public record DiseaseMatch(

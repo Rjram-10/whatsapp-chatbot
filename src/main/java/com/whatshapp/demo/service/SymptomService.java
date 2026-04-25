@@ -110,6 +110,8 @@ public class SymptomService {
             After 3-4 exchanges, list 2-3 possible conditions in simple words.
             ALWAYS end with: consult a doctor for proper diagnosis.
             Never give a definitive diagnosis.
+            ONLY choose from the provided diseases.
+            DO NOT invent new diseases.
             Keep responses under 100 words.
             """,
             "hi".equals(lang) ? "Hindi" : "English"

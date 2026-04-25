@@ -88,18 +88,12 @@ def get_precautions_for_disease(disease, precautions_df):
 
 def create_combined_text(disease, symptoms, description, precautions):
     """Create rich text for embedding — more context = better search"""
-    parts = [f"Disease name: {disease}"]
-    
-    if symptoms:
-        parts.append(f"Common symptoms include: {symptoms}")
-    
-    if description:
-        parts.append(f"Description: {description}")
-    
-    if precautions:
-        parts.append(f"Precautions and treatment: {precautions}")
-    
-    return ". ".join(parts)
+    return f"""
+    Disease: {disease}
+    Symptoms: {symptoms}
+    Description: {description}
+    Precautions: {precautions}
+    """
 
 def get_ollama_embedding(text):
     """Get embedding from Ollama nomic-embed-text — 768 dimensions"""
