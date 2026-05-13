@@ -9,26 +9,52 @@ A sophisticated, location-aware microservices application built with **Spring Bo
 The project follows a **Microservices Architecture** using Spring Cloud for inter-service communication and a Python-based RAG service for medical intelligence.
 
 ```mermaid
-graph TD
-    User((User)) <--> |WhatsApp Message| WA[whatsapp-service]
+flowchart LR
 
-    subgraph "Java Spring Boot Ecosystem"
-        WA <--> |OpenFeign| HS[health-service]
-        WA <--> |OpenFeign| PS[policy-service]
-        WA <--> |OpenFeign| US[utility-service]
+    %% User Layer
+    U((User))
+    WA[whatsapp-service]
 
-        HS <--> |Shared Models| Common[common]
-        PS <--> |Shared Models| Common
-        US <--> |Shared Models| Common
+    U -->|WhatsApp Message| WA
+
+    %% Core Services
+    subgraph SPRING["Spring Boot Microservices"]
+        direction TB
+
+        HS[health-service]
+        PS[policy-service]
+        US[utility-service]
+        CM[common module]
     end
 
-    subgraph "External Integrations"
-        HS <--> |REST| PY[python-service / RAG]
-        PS <--> |AWS SDK| AWS[AWS Location Service]
-        PS <--> |REST + x-api-key| MSG[myScheme API]
+    WA -->|OpenFeign| HS
+    WA -->|OpenFeign| PS
+    WA -->|OpenFeign| US
+
+    HS -. shared .-> CM
+    PS -. shared .-> CM
+    US -. shared .-> CM
+
+    %% AI Layer
+    subgraph AI["AI & Intelligence"]
+        PY[python-service / RAG]
+        OLLAMA[Ollama - Llama 3.2]
     end
 
-    subgraph "Data Layer"
+    HS -->|Medical Query| PY
+    PY --> OLLAMA
+
+    %% External APIs
+    subgraph EXT["External APIs"]
+        AWS[AWS Location Service]
+        MYS[myScheme API]
+    end
+
+    PS --> AWS
+    PS --> MYS
+
+    %% Databases
+    subgraph DATA["Data Layer"]
         PG[(PostgreSQL)]
         REDIS[(Upstash Redis)]
     end
@@ -36,8 +62,8 @@ graph TD
     HS --> PG
 
     WA --> REDIS
-    PS --> REDIS
     HS --> REDIS
+    PS --> REDIS
 ```
 
 ---
