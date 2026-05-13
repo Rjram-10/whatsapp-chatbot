@@ -1,5 +1,6 @@
 package com.whatshapp.demo.model;
 
+import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.Id;
@@ -16,5 +17,7 @@ public class DiseaseAlert {
     private String district;
     private String disease;
     private String cases;
+
+    @Column(columnDefinition = "TEXT")
     private String summary;
 }
