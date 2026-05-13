@@ -11,11 +11,12 @@ The project follows a **Microservices Architecture** using Spring Cloud for inte
 ```mermaid
 graph TD
     User((User)) <--> |WhatsApp Message| WA[whatsapp-service]
-    
+
     subgraph "Java Spring Boot Ecosystem"
         WA <--> |OpenFeign| HS[health-service]
         WA <--> |OpenFeign| PS[policy-service]
         WA <--> |OpenFeign| US[utility-service]
+
         HS <--> |Shared Models| Common[common]
         PS <--> |Shared Models| Common
         US <--> |Shared Models| Common
@@ -28,9 +29,15 @@ graph TD
     end
 
     subgraph "Data Layer"
-        HS [(PostgreSQL)]
-        WA & PS & HS [(Upstash Redis)]
+        PG[(PostgreSQL)]
+        REDIS[(Upstash Redis)]
     end
+
+    HS --> PG
+
+    WA --> REDIS
+    PS --> REDIS
+    HS --> REDIS
 ```
 
 ---
