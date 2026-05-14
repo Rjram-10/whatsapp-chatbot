@@ -48,6 +48,17 @@ public class MessageRouter {
             UserSession session = sessionService.getOrCreate(from);
             String lang = session.getLanguage() != null ? session.getLanguage() : "en";
 
+            // Re-detect language from every incoming message and update session if changed
+            if ("text".equals(type) && !originalText.isEmpty()) {
+                String detectedLang = detectLanguage(originalText);
+                if (!detectedLang.equals(lang)) {
+                    lang = detectedLang;
+                    session.setLanguage(lang);
+                    sessionService.save(session);
+                    log.info("Language switched to '{}' for user {}", lang, from);
+                }
+            }
+
             String text = originalText;
             if ("text".equals(type) && !originalText.isEmpty()) {
                 text = "en".equals(lang) ? originalText : translationClient.translate(new TranslationClient.TranslationRequest(originalText, "en"));
@@ -147,4 +158,10 @@ public class MessageRouter {
     }
 
     private boolean isLikelyCity(String text) { return text.length() > 2 && text.length() < 40 && !text.matches("^[1-5]$"); }
+
+    /** Detects Hindi by checking for Devanagari Unicode block (U+0900–U+097F). */
+    private String detectLanguage(String text) {
+        if (text != null && text.matches(".*[\\u0900-\\u097F].*")) return "hi";
+        return "en";
+    }
 }
