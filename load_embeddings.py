@@ -20,21 +20,24 @@ def setup_database(cur):
     cur.execute("SELECT version();")
     print(cur.fetchone())
     cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-    cur.execute("DROP TABLE IF EXISTS disease_embeddings;")
+    # Drop legacy table name (from old schema) and new table
+    cur.execute("DROP TABLE IF EXISTS disease_embeddings CASCADE;")
+    cur.execute("DROP TABLE IF EXISTS diseases CASCADE;")
     cur.execute("""
-        CREATE TABLE disease_embeddings (
+        CREATE TABLE diseases (
             id SERIAL PRIMARY KEY,
-            disease_name VARCHAR(200) NOT NULL,
+            name VARCHAR(200) NOT NULL,
             symptoms TEXT,
             description TEXT,
             precautions TEXT,
             combined_text TEXT,
-            embedding vector(768)
+            embedding vector(768),
+            severity_score FLOAT
         );
     """)
     cur.execute("""
-        CREATE INDEX disease_embedding_idx 
-        ON disease_embeddings 
+        CREATE INDEX IF NOT EXISTS disease_embedding_idx 
+        ON diseases 
         USING ivfflat (embedding vector_cosine_ops)
         WITH (lists = 10);
     """)
@@ -153,8 +156,8 @@ def main():
             
             # Insert into database
             cur.execute("""
-                INSERT INTO disease_embeddings 
-                (disease_name, symptoms, description, precautions, 
+                INSERT INTO diseases 
+                (name, symptoms, description, precautions, 
                  combined_text, embedding)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (
@@ -215,8 +218,14 @@ def main():
         }
     ]
     
-    print("\nAdding India-specific diseases...")
+    # Deduplicate: skip India-specific diseases already present in Kaggle dataset
+    kaggle_diseases = set(descriptions_df['Disease'].str.lower())
+    print("\nAdding India-specific diseases (skipping duplicates)...")
+    india_added = 0
     for disease_data in india_specific_diseases:
+        if disease_data["disease"].lower() in kaggle_diseases:
+            print(f"  ⟳ Skipped (already in Kaggle): {disease_data['disease']}")
+            continue
         combined_text = create_combined_text(
             disease_data["disease"],
             disease_data["symptoms"],
@@ -226,8 +235,8 @@ def main():
         embedding = get_ollama_embedding(combined_text)
         
         cur.execute("""
-            INSERT INTO disease_embeddings 
-            (disease_name, symptoms, description, precautions, 
+            INSERT INTO diseases 
+            (name, symptoms, description, precautions, 
              combined_text, embedding)
             VALUES (%s, %s, %s, %s, %s, %s)
         """, (
@@ -238,6 +247,7 @@ def main():
             combined_text,
             json.dumps(embedding)
         ))
+        india_added += 1
         print(f"  ✓ {disease_data['disease']}")
     
     conn.commit()
@@ -246,10 +256,10 @@ def main():
     
     print(f"\n{'='*50}")
     print(f"Complete! {success_count} diseases loaded successfully")
-    print(f"India-specific diseases added: {len(india_specific_diseases)}")
+    print(f"India-specific diseases added: {india_added} (of {len(india_specific_diseases)})")
     if error_count:
         print(f"Errors: {error_count}")
-    print(f"Total in database: {success_count + len(india_specific_diseases)}")
+    print(f"Total in database: {success_count + india_added}")
     print(f"{'='*50}")
     print("\nYou can now start the Spring Boot app with Ollama RAG!")
 

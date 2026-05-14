@@ -52,15 +52,19 @@ public class SymptomService {
 
     private String continueWithOllama(String userMessage, UserSession session) {
         String lang = session.getLanguage();
+        List<DiseaseSearchService.DiseaseMatch> topMatches = List.of();
         String context = "";
         if (session.getChatHistory().size() >= 2) {
-            String allSymptoms = session.getChatHistory().stream().filter(m -> "user".equals(m.getRole())).map(ChatMessage::getContent).collect(Collectors.joining(". "));
-            List<DiseaseSearchService.DiseaseMatch> matches = diseaseSearchService.findSimilarDiseases(allSymptoms, 3);
-            if (!matches.isEmpty()) {
-                context = diseaseSearchService.buildContext(matches);
+            String allSymptoms = session.getChatHistory().stream()
+                .filter(m -> "user".equals(m.getRole()))
+                .map(ChatMessage::getContent)
+                .collect(Collectors.joining(". "));
+            topMatches = diseaseSearchService.findSimilarDiseases(allSymptoms, 3);
+            if (!topMatches.isEmpty()) {
+                context = diseaseSearchService.buildContext(topMatches);
             }
         }
-        String systemPrompt = buildSystemPrompt(lang, context);
+        String systemPrompt = buildSystemPrompt(lang, context, topMatches);
         List<Map<String, String>> history = session.getChatHistory().stream().map(msg -> {
                     Map<String, String> m = new HashMap<>();
                     m.put("role", msg.getRole());
@@ -75,9 +79,28 @@ public class SymptomService {
         }
     }
 
-    private String buildSystemPrompt(String lang, String ragContext) {
-        String base = String.format("You are a public health assistant for India. Respond ONLY in %s language. Ask ONE follow-up question at a time. After 3-4 exchanges, list 2-3 possible conditions. ALWAYS end with: consult a doctor. Never give a definitive diagnosis. Keep responses under 100 words.", "hi".equals(lang) ? "Hindi" : "English");
+    private String buildSystemPrompt(String lang,
+                                      String ragContext,
+                                      List<DiseaseSearchService.DiseaseMatch> topMatches) {
+        String base = String.format(
+            "You are a public health assistant for India. Respond ONLY in %s language. " +
+            "Ask ONE follow-up question at a time. After 3-4 exchanges, list 2-3 possible conditions. " +
+            "ALWAYS end with: consult a doctor. Never give a definitive diagnosis. Keep responses under 100 words.",
+            "hi".equals(lang) ? "Hindi" : "English");
+
         if (!ragContext.isEmpty()) base += "\n\nRelevant medical context:\n" + ragContext;
+
+        // Inject discriminating hint when 2+ candidate diseases are competing
+        if (topMatches != null && topMatches.size() >= 2) {
+            String candidates = topMatches.stream()
+                .map(DiseaseSearchService.DiseaseMatch::getName)
+                .collect(Collectors.joining(", "));
+            base += String.format(
+                "\nTop candidate conditions based on symptoms so far: %s. " +
+                "Ask ONE follow-up question that would best distinguish between these.",
+                candidates);
+        }
+
         return base;
     }
 
@@ -93,7 +116,7 @@ public class SymptomService {
                 contents.add(content);
             }
             Map<String, Object> requestBody = new HashMap<>();
-            requestBody.put("system_instruction", Map.of("parts", List.of(Map.of("text", buildSystemPrompt(lang, "")))));
+            requestBody.put("system_instruction", Map.of("parts", List.of(Map.of("text", buildSystemPrompt(lang, "", List.of())))));
             requestBody.put("contents", contents);
             requestBody.put("generationConfig", Map.of("maxOutputTokens", 300));
             com.fasterxml.jackson.databind.JsonNode response = geminiClient.post().uri("/v1beta/models/gemini-1.5-flash:generateContent?key=" + geminiApiKey).header("Content-Type", "application/json").bodyValue(requestBody).retrieve().bodyToMono(com.fasterxml.jackson.databind.JsonNode.class).block();
